@@ -8,6 +8,7 @@ on:
       - 'migrations/**'
       - 'scripts/check-migration-names.sh'
       - '.github/workflows/apply-shared-staging.yml'
+  workflow_dispatch:
 
 concurrency:
   group: supabase-shared-staging
