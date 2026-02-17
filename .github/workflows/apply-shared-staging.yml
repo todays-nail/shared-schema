@@ -1,0 +1,36 @@
+name: Apply Shared Staging
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'migrations/**'
+      - 'scripts/check-migration-names.sh'
+      - '.github/workflows/apply-shared-staging.yml'
+
+concurrency:
+  group: supabase-shared-staging
+  cancel-in-progress: false
+
+jobs:
+  apply-staging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate migration filenames
+        run: bash scripts/check-migration-names.sh
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Prepare supabase migration directory
+        run: |
+          mkdir -p supabase/migrations
+          rsync -a --delete migrations/ supabase/migrations/
+
+      - name: Apply to shared-staging
+        env:
+          SUPABASE_DB_URL_SHARED_STAGING: ${{ secrets.SUPABASE_DB_URL_SHARED_STAGING }}
+        run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_STAGING" --yes

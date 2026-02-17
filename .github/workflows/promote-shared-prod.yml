@@ -1,0 +1,31 @@
+name: Promote Shared Prod
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: supabase-shared-prod
+  cancel-in-progress: false
+
+jobs:
+  promote-prod:
+    runs-on: ubuntu-latest
+    environment: shared-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate migration filenames
+        run: bash scripts/check-migration-names.sh
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+
+      - name: Prepare supabase migration directory
+        run: |
+          mkdir -p supabase/migrations
+          rsync -a --delete migrations/ supabase/migrations/
+
+      - name: Apply to shared-prod
+        env:
+          SUPABASE_DB_URL_SHARED_PROD: ${{ secrets.SUPABASE_DB_URL_SHARED_PROD }}
+        run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_PROD" --yes
