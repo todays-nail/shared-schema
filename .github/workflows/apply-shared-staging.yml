@@ -34,4 +34,4 @@ jobs:
       - name: Apply to shared-staging
         env:
           SUPABASE_DB_URL_SHARED_STAGING: ${{ secrets.SUPABASE_DB_URL_SHARED_STAGING }}
-        run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_STAGING" --yes
+        run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_STAGING"

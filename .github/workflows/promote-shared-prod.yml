@@ -28,4 +28,4 @@ jobs:
       - name: Apply to shared-prod
         env:
           SUPABASE_DB_URL_SHARED_PROD: ${{ secrets.SUPABASE_DB_URL_SHARED_PROD }}
-        run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_PROD" --yes
+        run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_PROD"
