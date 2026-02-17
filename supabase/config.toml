@@ -2,6 +2,3 @@ project_id = "shared-schema"
 
 [db]
 major_version = 17
-
-[db.migrations]
-enabled = true
