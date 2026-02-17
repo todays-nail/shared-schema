@@ -25,4 +25,6 @@ bash scripts/check-migration-names.sh
 - `SUPABASE_DB_URL_SHARED_PROD`
 
 ## CI Environment
-- `shared-prod` GitHub Environment에 승인자(최소 1명)를 설정해야 합니다.
+- `shared-prod` GitHub Environment는 필수입니다.
+- 해커톤/초기 개발 단계에서는 `Required reviewers`를 비워둘 수 있습니다.
+- 운영 전환 시에는 `Required reviewers` 1명 이상 설정을 권장합니다.
