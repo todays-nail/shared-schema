@@ -6,7 +6,11 @@ on:
       - main
     paths:
       - 'migrations/**'
+      - 'supabase/functions/**'
       - 'scripts/check-migration-names.sh'
+      - 'scripts/deploy-functions.sh'
+      - 'scripts/functions-check-deployed.sh'
+      - 'scripts/functions-check-auth-config.sh'
       - '.github/workflows/apply-shared-staging.yml'
   workflow_dispatch:
 
@@ -17,6 +21,8 @@ concurrency:
 jobs:
   apply-staging:
     runs-on: ubuntu-latest
+    env:
+      SUPABASE_PROJECT_REF: twahqxjhyocyqrmtjbdf
     steps:
       - uses: actions/checkout@v4
 
@@ -35,3 +41,18 @@ jobs:
         env:
           SUPABASE_DB_URL_SHARED_STAGING: ${{ secrets.SUPABASE_DB_URL_SHARED_STAGING }}
         run: supabase db push --db-url "$SUPABASE_DB_URL_SHARED_STAGING"
+
+      - name: Deploy edge functions
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: bash scripts/deploy-functions.sh "$SUPABASE_PROJECT_REF"
+
+      - name: Validate deployed functions
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: bash scripts/functions-check-deployed.sh "$SUPABASE_PROJECT_REF"
+
+      - name: Validate auth config
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: bash scripts/functions-check-auth-config.sh "$SUPABASE_PROJECT_REF"
