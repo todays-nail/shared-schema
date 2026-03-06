@@ -33,6 +33,13 @@ bash scripts/functions-check-auth-config.sh
 기본 프로젝트 ref는 `twahqxjhyocyqrmtjbdf`이며,
 필요 시 `SUPABASE_PROJECT_REF` 또는 첫 번째 인자로 override 가능합니다.
 
+## 로컬 환경 변수
+- 로컬 실행 시 저장소 루트 `.env`를 사용합니다.
+- 초기 설정:
+  - `cp .env.example .env`
+  - `client-app-ios/infra/.env`의 값을 `.env`에 동기화
+- `.env`는 로컬 전용이며 Git에 커밋하지 않습니다.
+
 ## 필수 Secrets
 GitHub Actions (Repository/Environment Secrets)
 - `SUPABASE_DB_URL_SHARED_STAGING`
