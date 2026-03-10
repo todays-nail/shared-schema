@@ -3,6 +3,7 @@ import pg from "npm:pg";
 import {
   buildJpegThumbnailBytesFromResult,
   defaultThumbnailObjectPath,
+  THUMBNAIL_BACKFILL_MAX_BYTES,
   THUMBNAIL_BUCKET,
   THUMBNAIL_CONTENT_TYPE,
   updateThumbnailPath,
@@ -21,11 +22,20 @@ type JobRow = {
 type StorageObjectRow = {
   name: string;
   mimetype: string | null;
+  size_bytes: number | null;
 };
 
+function requireFirstEnv(...keys: string[]): string {
+  for (const key of keys) {
+    const value = Deno.env.get(key)?.trim();
+    if (value) return value;
+  }
+  throw new Error(`Missing required environment variable. Tried: ${keys.join(", ")}`);
+}
+
 const supabaseUrl = requireEnv("SUPABASE_URL");
-const dbUrl = requireEnv("SUPABASE_DB_URL");
-const serviceRoleKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+const dbUrl = requireFirstEnv("SUPABASE_DB_URL", "SUPABASE_DB_URL_SHARED_STAGING");
+const serviceRoleKey = requireFirstEnv("SUPABASE_SERVICE_ROLE_KEY");
 const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
@@ -129,7 +139,8 @@ async function loadThumbnailMetadata(paths: string[]): Promise<Map<string, Stora
     `
       select
         name,
-        metadata->>'mimetype' as mimetype
+        metadata->>'mimetype' as mimetype,
+        nullif(metadata->>'size', '')::int as size_bytes
       from storage.objects
       where bucket_id = $1
         and name = any($2::text[])
@@ -143,7 +154,8 @@ async function loadThumbnailMetadata(paths: string[]): Promise<Map<string, Stora
 function needsRegeneration(job: JobRow, objectRow: StorageObjectRow | undefined): boolean {
   if (!job.result_thumbnail_object_path) return true;
   if (!objectRow) return true;
-  return objectRow.mimetype !== THUMBNAIL_CONTENT_TYPE;
+  if (objectRow.mimetype !== THUMBNAIL_CONTENT_TYPE) return true;
+  return (objectRow.size_bytes ?? 0) > THUMBNAIL_BACKFILL_MAX_BYTES;
 }
 
 async function regenerateThumbnail(job: JobRow): Promise<void> {
@@ -193,6 +205,7 @@ try {
     regenerated_count: regeneratedCount,
     skipped_count: skippedCount,
     failed_count: failedCount,
+    max_allowed_thumbnail_bytes: THUMBNAIL_BACKFILL_MAX_BYTES,
     last_processed_job_id: lastProcessedJobId,
     dry_run: options.dryRun,
   }, null, 2));

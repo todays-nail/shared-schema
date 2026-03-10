@@ -4,9 +4,10 @@ import { supabaseAdmin } from "./supabase.ts";
 export const RESULT_BUCKET = "nail-results-private";
 export const THUMBNAIL_BUCKET = "nail-results-thumb-public";
 export const THUMBNAIL_SIGNED_URL_EXPIRES_SEC = 60;
-export const THUMBNAIL_MAX_SIDE = 384;
-export const THUMBNAIL_QUALITY = 78;
+export const THUMBNAIL_MAX_SIDE = 320;
+export const THUMBNAIL_QUALITY = 72;
 export const THUMBNAIL_CONTENT_TYPE = "image/jpeg";
+export const THUMBNAIL_BACKFILL_MAX_BYTES = 280 * 1024;
 
 export function defaultThumbnailObjectPath(userId: string, jobId: string): string {
   return `${userId}/${jobId}/thumb.jpg`;

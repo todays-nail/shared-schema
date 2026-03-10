@@ -13,8 +13,8 @@ const RESULT_BUCKET = "nail-results-private";
 const THUMBNAIL_BUCKET = "nail-results-thumb-public";
 const RESULT_URL_EXPIRES_SEC = 10 * 60;
 const THUMBNAIL_FALLBACK_URL_EXPIRES_SEC = 60;
-const THUMBNAIL_FALLBACK_MAX_SIDE = 384;
-const THUMBNAIL_FALLBACK_QUALITY = 78;
+const THUMBNAIL_FALLBACK_MAX_SIDE = 320;
+const THUMBNAIL_FALLBACK_QUALITY = 72;
 
 type CursorPayload = {
   created_at: string;
