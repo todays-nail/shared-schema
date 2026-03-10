@@ -8,19 +8,23 @@ import {
   type AIGenerationPushEventType,
   type APNSPushToken,
 } from "../_shared/apns.ts";
+import {
+  buildJpegThumbnailBytesFromResult,
+  defaultThumbnailObjectPath,
+  RESULT_BUCKET,
+  THUMBNAIL_BUCKET,
+  THUMBNAIL_CONTENT_TYPE,
+  updateThumbnailPath,
+  uploadJpegThumbnail,
+} from "../_shared/nail-result-thumbnails.ts";
 
 const INPUT_BUCKET = "nail-inputs-private";
-const RESULT_BUCKET = "nail-results-private";
-const THUMBNAIL_BUCKET = "nail-results-thumb-public";
 const OPENAI_IMAGES_EDITS_URL = "https://api.openai.com/v1/images/edits";
 const WORKER_SECRET = requireEnv("NAIL_GEN_WORKER_SECRET");
 const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
 const SUPABASE_URL = requireEnv("SUPABASE_URL").replace(/\/+$/, "");
 const MAX_BATCH = 3;
 const MAX_OPENAI_ATTEMPTS = 2;
-const THUMBNAIL_SIGNED_URL_EXPIRES_SEC = 60;
-const THUMBNAIL_MAX_SIDE = 384;
-const THUMBNAIL_QUALITY = 78;
 const SELF_TRIGGER_TIMEOUT_MS = 1500;
 const IMAGE_MODEL: ImageModel = "gpt-image-1.5";
 type ImageModel = "gpt-image-1.5";
@@ -397,59 +401,6 @@ async function triggerWorkerDrainPass(jobIdForLog: string): Promise<void> {
   }
 }
 
-async function buildThumbnailFromResult(
-  resultObjectPath: string,
-): Promise<{ bytes: Uint8Array; contentType: string }> {
-  const { data: signed, error: signedError } = await supabaseAdmin.storage
-    .from(RESULT_BUCKET)
-    .createSignedUrl(resultObjectPath, THUMBNAIL_SIGNED_URL_EXPIRES_SEC, {
-      transform: {
-        width: THUMBNAIL_MAX_SIDE,
-        height: THUMBNAIL_MAX_SIDE,
-        resize: "cover",
-      },
-    });
-
-  if (signedError || !signed?.signedUrl) {
-    throw new WorkerError(
-      "THUMBNAIL_SIGNED_URL_FAILED",
-      `createSignedUrl failed: ${signedError?.message ?? "unknown"}`,
-      true,
-    );
-  }
-
-  const baseURL = absolutizeSignedUrl(signed.signedUrl);
-  const separator = baseURL.includes("?") ? "&" : "?";
-  const thumbnailURL = `${baseURL}${separator}format=jpeg&quality=${THUMBNAIL_QUALITY}`;
-
-  let response: Response;
-  try {
-    response = await fetch(thumbnailURL);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : "thumbnail fetch failed";
-    throw new WorkerError("THUMBNAIL_FETCH_FAILED", message, true);
-  }
-
-  if (!response.ok) {
-    throw new WorkerError(
-      "THUMBNAIL_FETCH_FAILED",
-      `thumbnail fetch status=${response.status}`,
-      true,
-      response.status,
-    );
-  }
-
-  const contentType = response.headers.get("content-type")
-    ?.split(";")[0]
-    ?.trim()
-    ?.toLowerCase() || "image/jpeg";
-
-  return {
-    bytes: new Uint8Array(await response.arrayBuffer()),
-    contentType,
-  };
-}
-
 async function claimJob(job: JobRow): Promise<JobRow | null> {
   const { data, error } = await supabaseAdmin
     .from("nail_generation_jobs")
@@ -493,20 +444,6 @@ async function completeJob(
 
   if (error) {
     throw new WorkerError("JOB_COMPLETE_UPDATE_FAILED", error.message, false);
-  }
-}
-
-async function updateJobThumbnailPath(jobId: string, thumbnailObjectPath: string): Promise<void> {
-  const { error } = await supabaseAdmin
-    .from("nail_generation_jobs")
-    .update({
-      result_thumbnail_object_path: thumbnailObjectPath,
-    })
-    .eq("id", jobId)
-    .eq("status", "completed");
-
-  if (error) {
-    throw new WorkerError("THUMBNAIL_UPDATE_FAILED", error.message, true);
   }
 }
 
@@ -589,20 +526,11 @@ async function generateAndAttachThumbnail(
 ): Promise<void> {
   const thumbnailStartedAt = performance.now();
   try {
-    const thumbnail = await buildThumbnailFromResult(resultObjectPath);
-    const { error: thumbnailUploadError } = await supabaseAdmin.storage
-      .from(THUMBNAIL_BUCKET)
-      .upload(thumbnailObjectPath, thumbnail.bytes, {
-        contentType: thumbnail.contentType || "image/jpeg",
-        upsert: true,
-      });
-    if (thumbnailUploadError) {
-      throw new WorkerError("THUMBNAIL_UPLOAD_FAILED", thumbnailUploadError.message, true);
-    }
-
-    await updateJobThumbnailPath(job.id, thumbnailObjectPath);
+    const thumbnailBytes = await buildJpegThumbnailBytesFromResult(resultObjectPath);
+    await uploadJpegThumbnail(thumbnailObjectPath, thumbnailBytes);
+    await updateThumbnailPath(job.id, thumbnailObjectPath);
     const thumbnailMs = performance.now() - thumbnailStartedAt;
-    jobLog(job.id, `thumbnail_ready thumbnail_ms=${clampMs(thumbnailMs)}`);
+    jobLog(job.id, `thumbnail_ready thumbnail_ms=${clampMs(thumbnailMs)} content_type=${THUMBNAIL_CONTENT_TYPE}`);
   } catch (e) {
     const message = e instanceof Error ? truncate(e.message, 180) : "thumbnail unknown error";
     jobLog(job.id, `thumbnail_skipped reason=${message}`);
@@ -650,7 +578,7 @@ serve(async (req) => {
       const jobStartedAt = performance.now();
       const openaiResult = await callOpenAIWithRetry(claimed);
       const resultObjectPath = `${claimed.user_id}/${claimed.id}/result.png`;
-      const thumbnailObjectPath = `${claimed.user_id}/${claimed.id}/thumb.jpg`;
+      const thumbnailObjectPath = defaultThumbnailObjectPath(claimed.user_id, claimed.id);
       claimed.model = openaiResult.model;
 
       const uploadStartedAt = performance.now();
