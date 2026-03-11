@@ -50,6 +50,23 @@ function parseIncludeInputs(raw: string | null): boolean {
   throw new Error("include_inputs must be boolean");
 }
 
+async function createSignedUrlOrNull(
+  bucket: string,
+  objectPath: string | null | undefined,
+): Promise<string | null> {
+  if (!objectPath) return null;
+
+  const { data, error } = await supabaseAdmin.storage
+    .from(bucket)
+    .createSignedUrl(objectPath, RESULT_URL_EXPIRES_SEC);
+
+  if (error || !data?.signedUrl) {
+    throw new Error(`createSignedUrl failed: ${error?.message ?? "unknown"}`);
+  }
+
+  return absolutizeSignedUrl(data.signedUrl);
+}
+
 async function requireUserId(req: Request): Promise<string> {
   const token = getBearerToken(req);
   if (!token) throw new Error("missing bearer token");
@@ -78,7 +95,7 @@ serve(async (req) => {
 
     const { data: job, error } = await supabaseAdmin
       .from("nail_generation_jobs")
-      .select("id, user_id, status, hand_object_path, reference_object_path, result_object_path, error_code, error_message, created_at, started_at, completed_at, parent_job_id, refinement_turn")
+      .select("id, user_id, status, hand_object_path, reference_object_path, result_object_path, error_code, error_message, created_at, started_at, completed_at, parent_job_id, refinement_turn, shape, extension_mode")
       .eq("id", jobId)
       .eq("user_id", userId)
       .is("deleted_at", null)
@@ -87,43 +104,30 @@ serve(async (req) => {
     if (error) return errorResponse(500, `job lookup failed: ${error.message}`);
     if (!job) return errorResponse(404, "job not found");
 
-    let resultImageUrl: string | null = null;
-    let handImageUrl: string | null = null;
-    let referenceImageUrl: string | null = null;
-    if (job.status === "completed" && job.result_object_path) {
-      const { data: signed, error: signedError } = await supabaseAdmin.storage
-        .from(RESULT_BUCKET)
-        .createSignedUrl(job.result_object_path, RESULT_URL_EXPIRES_SEC);
+    const [
+      { data: likeRow, error: likeError },
+      resultImageUrl,
+      handImageUrl,
+      referenceImageUrl,
+    ] = await Promise.all([
+      supabaseAdmin
+        .from("nail_generation_likes")
+        .select("job_id")
+        .eq("user_id", userId)
+        .eq("job_id", jobId)
+        .maybeSingle(),
+      job.status === "completed"
+        ? createSignedUrlOrNull(RESULT_BUCKET, job.result_object_path)
+        : Promise.resolve(null),
+      includeInputs
+        ? createSignedUrlOrNull(INPUT_BUCKET, job.hand_object_path)
+        : Promise.resolve(null),
+      includeInputs
+        ? createSignedUrlOrNull(INPUT_BUCKET, job.reference_object_path)
+        : Promise.resolve(null),
+    ]);
 
-      if (signedError || !signed?.signedUrl) {
-        return errorResponse(500, `createSignedUrl failed: ${signedError?.message ?? "unknown"}`);
-      }
-      resultImageUrl = absolutizeSignedUrl(signed.signedUrl);
-    }
-
-    if (includeInputs) {
-      if (job.hand_object_path) {
-        const { data: handSigned, error: handSignedError } = await supabaseAdmin.storage
-          .from(INPUT_BUCKET)
-          .createSignedUrl(job.hand_object_path, RESULT_URL_EXPIRES_SEC);
-
-        if (handSignedError || !handSigned?.signedUrl) {
-          return errorResponse(500, `createSignedUrl failed: ${handSignedError?.message ?? "unknown"}`);
-        }
-        handImageUrl = absolutizeSignedUrl(handSigned.signedUrl);
-      }
-
-      if (job.reference_object_path) {
-        const { data: referenceSigned, error: referenceSignedError } = await supabaseAdmin.storage
-          .from(INPUT_BUCKET)
-          .createSignedUrl(job.reference_object_path, RESULT_URL_EXPIRES_SEC);
-
-        if (referenceSignedError || !referenceSigned?.signedUrl) {
-          return errorResponse(500, `createSignedUrl failed: ${referenceSignedError?.message ?? "unknown"}`);
-        }
-        referenceImageUrl = absolutizeSignedUrl(referenceSigned.signedUrl);
-      }
-    }
+    if (likeError) return errorResponse(500, `like lookup failed: ${likeError.message}`);
 
     const nowMs = Date.now();
     const createdAtMs = parseTimestampMs(job.created_at);
@@ -138,10 +142,13 @@ serve(async (req) => {
       result_image_url: resultImageUrl,
       hand_image_url: handImageUrl,
       reference_image_url: referenceImageUrl,
+      shape: job.shape,
+      extension_mode: job.extension_mode,
       error_code: job.error_code,
       error_message: job.error_message,
       parent_job_id: job.parent_job_id,
       refinement_turn: job.refinement_turn ?? 0,
+      is_liked: !!likeRow,
       can_refine: false,
       queue_ms: diffMs(createdAtMs, queueEndMs),
       processing_ms: startedAtMs === null ? null : diffMs(startedAtMs, processingEndMs),
