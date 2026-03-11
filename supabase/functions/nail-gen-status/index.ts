@@ -12,6 +12,8 @@ import { requireEnv } from "../_shared/env.ts";
 const RESULT_BUCKET = "nail-results-private";
 const INPUT_BUCKET = "nail-inputs-private";
 const RESULT_URL_EXPIRES_SEC = 10 * 60;
+const DISPLAY_IMAGE_MAX_SIDE = 1080;
+const DISPLAY_IMAGE_QUALITY = 76;
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -65,6 +67,31 @@ async function createSignedUrlOrNull(
   }
 
   return absolutizeSignedUrl(data.signedUrl);
+}
+
+async function createDisplaySignedUrlOrNull(
+  bucket: string,
+  objectPath: string | null | undefined,
+): Promise<string | null> {
+  if (!objectPath) return null;
+
+  const { data, error } = await supabaseAdmin.storage
+    .from(bucket)
+    .createSignedUrl(objectPath, RESULT_URL_EXPIRES_SEC, {
+      transform: {
+        width: DISPLAY_IMAGE_MAX_SIDE,
+        height: DISPLAY_IMAGE_MAX_SIDE,
+        resize: "contain",
+      },
+    });
+
+  if (error || !data?.signedUrl) {
+    throw new Error(`createSignedUrl failed: ${error?.message ?? "unknown"}`);
+  }
+
+  const baseUrl = absolutizeSignedUrl(data.signedUrl);
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  return `${baseUrl}${separator}format=jpeg&quality=${DISPLAY_IMAGE_QUALITY}`;
 }
 
 async function requireUserId(req: Request): Promise<string> {
@@ -121,7 +148,14 @@ serve(async (req) => {
 
     const urlBuildPromise = (async () => {
       const startedAtMs = Date.now();
-      const [resultImageUrl, handImageUrl, referenceImageUrl] = await Promise.all([
+      const [
+        resultImageUrl,
+        handImageUrl,
+        referenceImageUrl,
+        resultDisplayImageUrl,
+        handDisplayImageUrl,
+        referenceDisplayImageUrl,
+      ] = await Promise.all([
         job.status === "completed"
           ? createSignedUrlOrNull(RESULT_BUCKET, job.result_object_path)
           : Promise.resolve(null),
@@ -131,11 +165,23 @@ serve(async (req) => {
         includeInputs
           ? createSignedUrlOrNull(INPUT_BUCKET, job.reference_object_path)
           : Promise.resolve(null),
+        job.status === "completed"
+          ? createDisplaySignedUrlOrNull(RESULT_BUCKET, job.result_object_path)
+          : Promise.resolve(null),
+        includeInputs
+          ? createDisplaySignedUrlOrNull(INPUT_BUCKET, job.hand_object_path)
+          : Promise.resolve(null),
+        includeInputs
+          ? createDisplaySignedUrlOrNull(INPUT_BUCKET, job.reference_object_path)
+          : Promise.resolve(null),
       ]);
       return {
         resultImageUrl,
         handImageUrl,
         referenceImageUrl,
+        resultDisplayImageUrl,
+        handDisplayImageUrl,
+        referenceDisplayImageUrl,
         elapsedMs: Date.now() - startedAtMs,
       };
     })();
@@ -146,6 +192,9 @@ serve(async (req) => {
         resultImageUrl,
         handImageUrl,
         referenceImageUrl,
+        resultDisplayImageUrl,
+        handDisplayImageUrl,
+        referenceDisplayImageUrl,
         elapsedMs: urlBuildElapsedMs,
       },
     ] = await Promise.all([
@@ -168,6 +217,9 @@ serve(async (req) => {
       result_image_url: resultImageUrl,
       hand_image_url: handImageUrl,
       reference_image_url: referenceImageUrl,
+      result_display_image_url: resultDisplayImageUrl,
+      hand_display_image_url: handDisplayImageUrl,
+      reference_display_image_url: referenceDisplayImageUrl,
       shape: job.shape,
       extension_mode: job.extension_mode,
       error_code: job.error_code,
