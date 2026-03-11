@@ -93,6 +93,9 @@ serve(async (req) => {
     const includeInputs = parseIncludeInputs(url.searchParams.get("include_inputs"));
     if (!isUuid(jobId)) return errorResponse(400, "job_id must be uuid");
 
+    const requestStartedAtMs = Date.now();
+
+    const jobQueryStartedAtMs = Date.now();
     const { data: job, error } = await supabaseAdmin
       .from("nail_generation_jobs")
       .select("id, user_id, status, hand_object_path, reference_object_path, result_object_path, error_code, error_message, created_at, started_at, completed_at, parent_job_id, refinement_turn, shape, extension_mode")
@@ -100,31 +103,54 @@ serve(async (req) => {
       .eq("user_id", userId)
       .is("deleted_at", null)
       .maybeSingle();
+    const jobQueryElapsedMs = Date.now() - jobQueryStartedAtMs;
 
     if (error) return errorResponse(500, `job lookup failed: ${error.message}`);
     if (!job) return errorResponse(404, "job not found");
 
-    const [
-      { data: likeRow, error: likeError },
-      resultImageUrl,
-      handImageUrl,
-      referenceImageUrl,
-    ] = await Promise.all([
-      supabaseAdmin
+    const likeLookupPromise = (async () => {
+      const startedAtMs = Date.now();
+      const result = await supabaseAdmin
         .from("nail_generation_likes")
         .select("job_id")
         .eq("user_id", userId)
         .eq("job_id", jobId)
-        .maybeSingle(),
-      job.status === "completed"
-        ? createSignedUrlOrNull(RESULT_BUCKET, job.result_object_path)
-        : Promise.resolve(null),
-      includeInputs
-        ? createSignedUrlOrNull(INPUT_BUCKET, job.hand_object_path)
-        : Promise.resolve(null),
-      includeInputs
-        ? createSignedUrlOrNull(INPUT_BUCKET, job.reference_object_path)
-        : Promise.resolve(null),
+        .maybeSingle();
+      return { ...result, elapsedMs: Date.now() - startedAtMs };
+    })();
+
+    const urlBuildPromise = (async () => {
+      const startedAtMs = Date.now();
+      const [resultImageUrl, handImageUrl, referenceImageUrl] = await Promise.all([
+        job.status === "completed"
+          ? createSignedUrlOrNull(RESULT_BUCKET, job.result_object_path)
+          : Promise.resolve(null),
+        includeInputs
+          ? createSignedUrlOrNull(INPUT_BUCKET, job.hand_object_path)
+          : Promise.resolve(null),
+        includeInputs
+          ? createSignedUrlOrNull(INPUT_BUCKET, job.reference_object_path)
+          : Promise.resolve(null),
+      ]);
+      return {
+        resultImageUrl,
+        handImageUrl,
+        referenceImageUrl,
+        elapsedMs: Date.now() - startedAtMs,
+      };
+    })();
+
+    const [
+      { data: likeRow, error: likeError, elapsedMs: likeLookupElapsedMs },
+      {
+        resultImageUrl,
+        handImageUrl,
+        referenceImageUrl,
+        elapsedMs: urlBuildElapsedMs,
+      },
+    ] = await Promise.all([
+      likeLookupPromise,
+      urlBuildPromise,
     ]);
 
     if (likeError) return errorResponse(500, `like lookup failed: ${likeError.message}`);
@@ -137,7 +163,7 @@ serve(async (req) => {
     const processingEndMs = completedAtMs ?? nowMs;
     const totalEndMs = completedAtMs ?? nowMs;
 
-    return jsonResponse(200, {
+    const response = jsonResponse(200, {
       status: job.status,
       result_image_url: resultImageUrl,
       hand_image_url: handImageUrl,
@@ -154,6 +180,12 @@ serve(async (req) => {
       processing_ms: startedAtMs === null ? null : diffMs(startedAtMs, processingEndMs),
       total_ms: diffMs(createdAtMs, totalEndMs),
     });
+
+    console.log(
+      `[nail-gen-status] detail_status_db_query_ms=${jobQueryElapsedMs} detail_status_like_lookup_ms=${likeLookupElapsedMs} detail_status_url_build_ms=${urlBuildElapsedMs} detail_status_total_ms=${Date.now() - requestStartedAtMs} include_inputs=${includeInputs}`,
+    );
+
+    return response;
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
     if (message.includes("include_inputs")) return errorResponse(400, message);
