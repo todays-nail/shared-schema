@@ -1,27 +1,27 @@
 # shared-schema
 
-Supabase 공용 canonical 저장소입니다.
+Canonical Supabase repository for shared schema and Edge Function operations.
 
 ## Canonical Scope
 - `migrations/` (DB schema + data migration)
 - `supabase/functions/` (Edge Functions + `_shared`)
 
-`shared-staging/shared-prod` 반영은 이 저장소 CI에서만 수행합니다.
+Deployment to `shared-staging` and `shared-prod` is performed only by this repository's CI workflows.
 
-## 운영 원칙
-- DB/Functions 변경은 이 저장소에서만 허용합니다.
-- 앱 저장소(`client-app-ios`, `owner-app`)에서는 DB/Functions 소스를 직접 수정하지 않습니다.
-- 앱 저장소는 API 소비자이며, 계약이 바뀔 때만 앱 코드를 수정합니다.
-- 무중단을 위해 기본 전략은 Expand -> App/Function 반영 -> Contract 2단계입니다.
+## Operating Principles
+- Allow DB and Edge Function source changes only in this repository.
+- Do not edit DB or Edge Function sources directly from app repositories such as `client-app-ios` or `owner-app`.
+- App repositories are API consumers and should change only when the contract changes.
+- For zero-downtime delivery, use the default rollout strategy: Expand -> App/Function adoption -> Contract.
 
 ## CI Workflows
 - `.github/workflows/apply-shared-staging.yml`
-  - `main` push 시 DB push 후 함수 배포/검증
+  - On `main` pushes, apply DB changes and then deploy/validate functions
 - `.github/workflows/promote-shared-prod.yml`
-  - 수동 실행 + `shared-prod` environment 승인 후 DB/함수 반영
+  - Manually triggered, then promoted to production after `shared-prod` environment approval
 
 ## Function Deploy & Validation
-로컬 수동 실행 예시:
+Example local commands:
 
 ```bash
 # repo root: shared-schema
@@ -30,23 +30,23 @@ bash scripts/functions-check-deployed.sh
 bash scripts/functions-check-auth-config.sh
 ```
 
-기본 프로젝트 ref는 `twahqxjhyocyqrmtjbdf`이며,
-필요 시 `SUPABASE_PROJECT_REF` 또는 첫 번째 인자로 override 가능합니다.
+The default project ref is `twahqxjhyocyqrmtjbdf`.
+Override it with `SUPABASE_PROJECT_REF` or the first positional argument when needed.
 
-## 로컬 환경 변수
-- 로컬 실행 시 저장소 루트 `.env`를 사용합니다.
-- 초기 설정:
+## Local Environment Variables
+- Use the repository root `.env` file for local commands.
+- Initial setup:
   - `cp .env.example .env`
-  - `client-app-ios/infra/.env`의 값을 `.env`에 동기화
-- `.env`는 로컬 전용이며 Git에 커밋하지 않습니다.
+  - Sync the values from `client-app-ios/infra/.env` into `.env`
+- `.env` is for local use only and must not be committed.
 
-## 필수 Secrets
-GitHub Actions (Repository/Environment Secrets)
+## Required Secrets
+GitHub Actions (repository or environment secrets)
 - `SUPABASE_DB_URL_SHARED_STAGING`
 - `SUPABASE_DB_URL_SHARED_PROD`
 - `SUPABASE_ACCESS_TOKEN`
 
-Supabase Edge Functions Secrets
+Supabase Edge Function secrets
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `APP_JWT_SECRET`
@@ -61,17 +61,17 @@ Supabase Edge Functions Secrets
 - `APNS_TOPIC`
 - `APNS_DEFAULT_ENV` (optional)
 
-## Migration 파일명 규칙
-- 전환 시점(`20260218000000`) 이후 신규 파일명:
+## Migration Filename Rule
+- For files created after the transition point (`20260218000000`):
   - `YYYYMMDDHHMMSS_<team>_<description>.sql`
-  - `<team>`: `ios` 또는 `web`
+  - `<team>`: `ios` or `web`
 
-## 수동 검증
+## Manual Verification
 ```bash
 bash scripts/check-migration-names.sh
 ```
 
 ## CI Environment
-- `shared-prod` GitHub Environment는 필수입니다.
-- 해커톤/초기 개발 단계에서는 `Required reviewers`를 비워둘 수 있습니다.
-- 운영 전환 시에는 `Required reviewers` 1명 이상 설정을 권장합니다.
+- The `shared-prod` GitHub Environment is required.
+- During hackathon or early development stages, `Required reviewers` may be left empty.
+- Before full production use, configure at least one `Required reviewer`.
