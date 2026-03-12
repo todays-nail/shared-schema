@@ -4,3 +4,5 @@ supabase/.branches/
 .env
 .env.local
 !.env.example
+.codex-baselines/
+.codex-postdeploy/
