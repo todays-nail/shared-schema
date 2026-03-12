@@ -2,24 +2,14 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FUNCTIONS_DIR="$ROOT_DIR/supabase/functions"
-PROJECT_REF="${1:-${SUPABASE_PROJECT_REF:-twahqxjhyocyqrmtjbdf}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./lib/functions-common.sh
+source "$SCRIPT_DIR/lib/functions-common.sh"
 
-if ! command -v supabase >/dev/null 2>&1; then
-  echo "ERROR: supabase CLI is not installed."
-  exit 1
-fi
+PROJECT_REF="$(resolve_project_ref "${1:-}")"
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "ERROR: jq is not installed."
-  exit 1
-fi
-
-if [[ ! -d "$FUNCTIONS_DIR" ]]; then
-  echo "ERROR: functions directory not found: $FUNCTIONS_DIR"
-  exit 1
-fi
+require_command "jq"
+require_command "supabase"
 
 expected_mode_for() {
   case "$1" in
@@ -76,10 +66,10 @@ required_secrets_for_mode() {
 }
 
 LOCAL_FUNCTIONS=()
-while IFS= read -r file; do
-  func_name="$(basename "$(dirname "$file")")"
+while IFS= read -r func_name; do
+  [[ -n "$func_name" ]] || continue
   LOCAL_FUNCTIONS+=("$func_name")
-done < <(find "$FUNCTIONS_DIR" -mindepth 2 -maxdepth 2 -name "index.ts" | sort)
+done < <(list_local_function_names)
 
 if [[ ${#LOCAL_FUNCTIONS[@]} -eq 0 ]]; then
   echo "No local edge functions found."
