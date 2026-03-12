@@ -1,50 +1,37 @@
 #!/usr/bin/env bash
 
-set -uo pipefail
+set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FUNCTIONS_DIR="$ROOT_DIR/supabase/functions"
-PROJECT_REF="${1:-${SUPABASE_PROJECT_REF:-twahqxjhyocyqrmtjbdf}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./lib/functions-common.sh
+source "$SCRIPT_DIR/lib/functions-common.sh"
 
-if ! command -v supabase >/dev/null 2>&1; then
-  echo "ERROR: supabase CLI is not installed."
-  exit 1
-fi
+PROJECT_REF="$(resolve_project_ref "${1:-}")"
 
-if [[ ! -d "$FUNCTIONS_DIR" ]]; then
-  echo "ERROR: functions directory not found: $FUNCTIONS_DIR"
-  exit 1
-fi
+require_command "jq"
+require_command "supabase"
 
 LOCAL_FUNCTIONS=()
-while IFS= read -r file; do
-  func_name="$(basename "$(dirname "$file")")"
+while IFS= read -r func_name; do
+  [[ -n "$func_name" ]] || continue
   LOCAL_FUNCTIONS+=("$func_name")
-done < <(find "$FUNCTIONS_DIR" -mindepth 2 -maxdepth 2 -name "index.ts" | sort)
+done < <(list_local_function_names)
 
 if [[ ${#LOCAL_FUNCTIONS[@]} -eq 0 ]]; then
   echo "No local edge functions found."
   exit 1
 fi
 
-LIST_OUTPUT="$(supabase functions list --project-ref "$PROJECT_REF")"
-if [[ $? -ne 0 ]]; then
+if ! REMOTE_JSON="$(supabase functions list -o json --project-ref "$PROJECT_REF")"; then
   echo "ERROR: failed to list remote functions for project: $PROJECT_REF"
   exit 1
 fi
 
 REMOTE_FUNCTIONS=()
-while IFS= read -r line; do
-  name="$(echo "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')"
-  if [[ -n "$name" && "$name" != "SLUG" ]]; then
-    REMOTE_FUNCTIONS+=("$name")
-  fi
-done < <(echo "$LIST_OUTPUT" | awk -F'|' '/\|/ && $0 !~ /---/')
-
-if [[ ${#REMOTE_FUNCTIONS[@]} -eq 0 ]]; then
-  echo "ERROR: no remote functions found on project: $PROJECT_REF"
-  exit 1
-fi
+while IFS= read -r remote_name; do
+  [[ -n "$remote_name" ]] || continue
+  REMOTE_FUNCTIONS+=("$remote_name")
+done < <(echo "$REMOTE_JSON" | jq -r '.[].name' | sort -u)
 
 MISSING=()
 for func_name in "${LOCAL_FUNCTIONS[@]}"; do

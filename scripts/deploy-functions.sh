@@ -2,24 +2,19 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FUNCTIONS_DIR="$ROOT_DIR/supabase/functions"
-PROJECT_REF="${1:-${SUPABASE_PROJECT_REF:-twahqxjhyocyqrmtjbdf}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./lib/functions-common.sh
+source "$SCRIPT_DIR/lib/functions-common.sh"
 
-if ! command -v supabase >/dev/null 2>&1; then
-  echo "ERROR: supabase CLI is not installed."
-  exit 1
-fi
+PROJECT_REF="$(resolve_project_ref "${1:-}")"
 
-if [[ ! -d "$FUNCTIONS_DIR" ]]; then
-  echo "ERROR: functions directory not found: $FUNCTIONS_DIR"
-  exit 1
-fi
+require_command "supabase"
 
 FUNCTIONS=()
-while IFS= read -r file; do
-  FUNCTIONS+=("$(basename "$(dirname "$file")")")
-done < <(find "$FUNCTIONS_DIR" -mindepth 2 -maxdepth 2 -name "index.ts" | sort)
+while IFS= read -r func_name; do
+  [[ -n "$func_name" ]] || continue
+  FUNCTIONS+=("$func_name")
+done < <(list_local_function_names)
 
 if [[ ${#FUNCTIONS[@]} -eq 0 ]]; then
   echo "No local edge functions found."
