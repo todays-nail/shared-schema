@@ -22,8 +22,14 @@ if [[ ${#FUNCTIONS[@]} -eq 0 ]]; then
 fi
 
 for func_name in "${FUNCTIONS[@]}"; do
-  echo "[deploy-functions] deploying: $func_name"
-  supabase functions deploy "$func_name" --project-ref "$PROJECT_REF" --no-verify-jwt
+  expected_verify_jwt="$(expected_verify_jwt_for_function "$func_name")"
+  deploy_args=()
+  if [[ "$expected_verify_jwt" == "false" ]]; then
+    deploy_args+=(--no-verify-jwt)
+  fi
+
+  echo "[deploy-functions] deploying: $func_name verify_jwt=$expected_verify_jwt"
+  supabase functions deploy "$func_name" --project-ref "$PROJECT_REF" "${deploy_args[@]}"
 done
 
 echo "[deploy-functions] completed. deployed=${#FUNCTIONS[@]} project=$PROJECT_REF"
