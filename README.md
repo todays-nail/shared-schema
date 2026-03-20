@@ -26,6 +26,7 @@ Example local commands:
 ```bash
 # repo root: shared-schema
 bash scripts/deploy-functions.sh
+bash scripts/deploy-single-function.sh nail-gen-worker
 bash scripts/functions-check-deployed.sh
 bash scripts/functions-check-auth-config.sh
 ```

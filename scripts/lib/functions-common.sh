@@ -46,3 +46,49 @@ list_local_function_names() {
       done \
     | sort -u
 }
+
+expected_mode_for_function() {
+  case "$1" in
+    feed-detail|feed-like|feed-list|nail-gen-delete|nail-gen-like|nail-gen-list|nail-gen-refine-request|nail-gen-request|nail-gen-status|nail-gen-upload-url|owner-dashboard-summary|owner-notification-list|owner-notification-mark-all-read|owner-notification-mark-read|owner-payment-ledger-upsert|owner-quote-request-list|owner-quote-response-upsert|profile-style-insight|push-token-deactivate|push-token-upsert|quote-request-create|quote-request-list|quote-response-list|quote-response-select|region-boundary|regions-list|regions-tree|reservation-create|reservation-list|reservation-slots|shop-detail|shop-recommend|shop-search|users-delete|users-me)
+      echo "app_access_jwt"
+      ;;
+    auth-refresh|auth-logout)
+      echo "refresh_token"
+      ;;
+    auth-kakao)
+      echo "kakao_exchange"
+      ;;
+    auth-google)
+      echo "google_exchange"
+      ;;
+    auth-apple)
+      echo "apple_exchange"
+      ;;
+    public-app-config|public-onboarding-styles)
+      echo "public_config"
+      ;;
+    nail-gen-worker)
+      echo "worker_secret"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+expected_verify_jwt_for_mode() {
+  case "$1" in
+    "")
+      echo ""
+      ;;
+    *)
+      echo "false"
+      ;;
+  esac
+}
+
+expected_verify_jwt_for_function() {
+  local mode
+  mode="$(expected_mode_for_function "$1")"
+  expected_verify_jwt_for_mode "$mode"
+}
