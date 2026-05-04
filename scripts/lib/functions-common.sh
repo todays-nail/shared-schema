@@ -64,6 +64,9 @@ expected_mode_for_function() {
     auth-apple)
       echo "apple_exchange"
       ;;
+    auth-dev-login)
+      echo "dev_exchange"
+      ;;
     public-app-config|public-onboarding-styles)
       echo "public_config"
       ;;
