@@ -1,1 +1,4 @@
 project_id = "shared-schema"
+
+[functions.auth-dev-login]
+verify_jwt = false
