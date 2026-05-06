@@ -28,6 +28,8 @@ jobs:
 
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
+        with:
+          version: latest
 
       - name: Prepare shared deploy inputs
         run: bash scripts/prepare-shared-deploy.sh
