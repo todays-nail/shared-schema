@@ -4,9 +4,9 @@ import { errorResponse, jsonResponse } from "../_shared/http.ts";
 import { requireEnv } from "../_shared/env.ts";
 import { supabaseAdmin } from "../_shared/supabase.ts";
 import {
-  sendAIGenerationPushToTokens,
   type AIGenerationPushEventType,
   type APNSPushToken,
+  sendAIGenerationPushToTokens,
 } from "../_shared/apns.ts";
 import {
   buildJpegThumbnailBytesFromResult,
@@ -25,9 +25,12 @@ const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
 const SUPABASE_URL = requireEnv("SUPABASE_URL").replace(/\/+$/, "");
 const MAX_BATCH = 3;
 const MAX_OPENAI_ATTEMPTS = 2;
+const MAX_JOB_ATTEMPTS = 2;
+const OPENAI_REQUEST_TIMEOUT_MS = 150_000;
+const PROCESSING_STALE_AFTER_MS = 10 * 60 * 1000;
 const SELF_TRIGGER_TIMEOUT_MS = 1500;
-const IMAGE_MODEL: ImageModel = "gpt-image-1.5";
-type ImageModel = "gpt-image-1.5";
+const IMAGE_MODEL: ImageModel = "gpt-image-2";
+type ImageModel = "gpt-image-2";
 type EdgeRuntimeLike = {
   waitUntil?: (promise: Promise<unknown>) => void;
 };
@@ -38,7 +41,13 @@ class WorkerError extends Error {
   statusCode?: number;
   model?: ImageModel;
 
-  constructor(code: string, message: string, retriable: boolean, statusCode?: number, model?: ImageModel) {
+  constructor(
+    code: string,
+    message: string,
+    retriable: boolean,
+    statusCode?: number,
+    model?: ImageModel,
+  ) {
     super(message);
     this.name = "WorkerError";
     this.code = code;
@@ -66,23 +75,36 @@ type OpenAICallResult = {
   openaiMs: number;
 };
 
+type StaleRecoveryResult = {
+  reset: number;
+  failed: number;
+};
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function runInBackground(task: Promise<void>): void {
-  const runtime = (globalThis as typeof globalThis & { EdgeRuntime?: EdgeRuntimeLike }).EdgeRuntime;
+  const runtime =
+    (globalThis as typeof globalThis & { EdgeRuntime?: EdgeRuntimeLike })
+      .EdgeRuntime;
   if (runtime?.waitUntil) {
     runtime.waitUntil(
       task.catch((error) => {
-        const message = error instanceof Error ? truncate(error.message, 200) : truncate(String(error), 200);
-        console.warn(`[nail-gen-worker] background task failed message=${message}`);
+        const message = error instanceof Error
+          ? truncate(error.message, 200)
+          : truncate(String(error), 200);
+        console.warn(
+          `[nail-gen-worker] background task failed message=${message}`,
+        );
       }),
     );
     return;
   }
   void task.catch((error) => {
-    const message = error instanceof Error ? truncate(error.message, 200) : truncate(String(error), 200);
+    const message = error instanceof Error
+      ? truncate(error.message, 200)
+      : truncate(String(error), 200);
     console.warn(`[nail-gen-worker] background task failed message=${message}`);
   });
 }
@@ -115,18 +137,26 @@ function decodeBase64(base64: string): Uint8Array {
   return out;
 }
 
-function encodeBase64(bytes: Uint8Array): string {
-  const chunkSize = 0x8000;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
+function fileNameFromPath(path: string, fallback: string): string {
+  const lastSegment = path.split("/").pop()?.trim();
+  return lastSegment || fallback;
 }
 
-function toDataUrl(bytes: Uint8Array, contentType: string): string {
-  return `data:${contentType};base64,${encodeBase64(bytes)}`;
+function appendImageInput(
+  formData: FormData,
+  bytes: Uint8Array,
+  objectPath: string,
+  fallbackName: string,
+): void {
+  const imageBytes = new Uint8Array(bytes.byteLength);
+  imageBytes.set(bytes);
+  formData.append(
+    "image[]",
+    new Blob([imageBytes.buffer as ArrayBuffer], {
+      type: contentTypeFromPath(objectPath),
+    }),
+    fileNameFromPath(objectPath, fallbackName),
+  );
 }
 
 function absolutizeSignedUrl(signedUrl: string): string {
@@ -134,8 +164,12 @@ function absolutizeSignedUrl(signedUrl: string): string {
     return signedUrl;
   }
 
-  if (signedUrl.startsWith("/storage/v1/")) return `${SUPABASE_URL}${signedUrl}`;
-  if (signedUrl.startsWith("/object/")) return `${SUPABASE_URL}/storage/v1${signedUrl}`;
+  if (signedUrl.startsWith("/storage/v1/")) {
+    return `${SUPABASE_URL}${signedUrl}`;
+  }
+  if (signedUrl.startsWith("/object/")) {
+    return `${SUPABASE_URL}/storage/v1${signedUrl}`;
+  }
   if (signedUrl.startsWith("/")) return `${SUPABASE_URL}${signedUrl}`;
   return `${SUPABASE_URL}/${signedUrl}`;
 }
@@ -150,9 +184,17 @@ function normalizeError(e: unknown): { code: string; message: string } {
   return { code: "INTERNAL_ERROR", message: "Unknown error" };
 }
 
+function isAbortError(e: unknown): boolean {
+  return typeof e === "object" && e !== null &&
+    "name" in e && (e as { name?: unknown }).name === "AbortError";
+}
+
 type ExtensionMode = "NATURAL" | "EXTEND";
 
-function buildPrompt(shape: JobRow["shape"], extensionMode: ExtensionMode): string {
+function buildPrompt(
+  shape: JobRow["shape"],
+  extensionMode: ExtensionMode,
+): string {
   const shapeInstruction = (() => {
     switch (shape) {
       case "square":
@@ -223,14 +265,22 @@ function clampMs(value: number): number {
 }
 
 async function downloadObject(path: string): Promise<Uint8Array> {
-  const { data, error } = await supabaseAdmin.storage.from(INPUT_BUCKET).download(path);
+  const { data, error } = await supabaseAdmin.storage.from(INPUT_BUCKET)
+    .download(path);
   if (error || !data) {
-    throw new WorkerError("INPUT_DOWNLOAD_FAILED", `download failed: ${error?.message ?? "not found"}`, false);
+    throw new WorkerError(
+      "INPUT_DOWNLOAD_FAILED",
+      `download failed: ${error?.message ?? "not found"}`,
+      false,
+    );
   }
   return new Uint8Array(await data.arrayBuffer());
 }
 
-async function callOpenAI(job: JobRow, model: ImageModel): Promise<OpenAICallResult> {
+async function callOpenAI(
+  job: JobRow,
+  model: ImageModel,
+): Promise<OpenAICallResult> {
   const downloadStartedAt = performance.now();
   const [handBytes, referenceBytes] = await Promise.all([
     downloadObject(job.hand_object_path),
@@ -239,36 +289,68 @@ async function callOpenAI(job: JobRow, model: ImageModel): Promise<OpenAICallRes
   const downloadMs = performance.now() - downloadStartedAt;
 
   const openaiStartedAt = performance.now();
-  const payload = {
-    model,
-    prompt: buildPrompt(job.shape, job.extension_mode),
-    images: [
-      {
-        image_url: toDataUrl(handBytes, contentTypeFromPath(job.hand_object_path)),
-      },
-      {
-        image_url: toDataUrl(referenceBytes, contentTypeFromPath(job.reference_object_path)),
-      },
-    ],
-    input_fidelity: "high",
-    size: "auto",
-    quality: "high",
-    output_format: "png",
-  };
+  const formData = new FormData();
+  formData.append("model", model);
+  formData.append("prompt", buildPrompt(job.shape, job.extension_mode));
+  appendImageInput(formData, handBytes, job.hand_object_path, "hand.png");
+  appendImageInput(
+    formData,
+    referenceBytes,
+    job.reference_object_path,
+    "reference.png",
+  );
+  // gpt-image-2 always processes inputs at high fidelity; input_fidelity is not accepted.
+  formData.append("size", "1024x1024");
+  formData.append("quality", "medium");
+  formData.append("output_format", "png");
 
   let response: Response;
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    response = await fetch(OPENAI_IMAGES_EDITS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
+    const timeoutPromise = new Promise<Response>((_, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        reject(
+          new WorkerError(
+            "OPENAI_TIMEOUT",
+            `openai request timed out after ${OPENAI_REQUEST_TIMEOUT_MS}ms`,
+            false,
+            undefined,
+            model,
+          ),
+        );
+      }, OPENAI_REQUEST_TIMEOUT_MS);
     });
+
+    response = await Promise.race([
+      fetch(OPENAI_IMAGES_EDITS_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: formData,
+        signal: controller.signal,
+      }),
+      timeoutPromise,
+    ]);
   } catch (e) {
+    if (e instanceof WorkerError) {
+      throw e;
+    }
+    if (isAbortError(e)) {
+      throw new WorkerError(
+        "OPENAI_TIMEOUT",
+        `openai request timed out after ${OPENAI_REQUEST_TIMEOUT_MS}ms`,
+        false,
+        undefined,
+        model,
+      );
+    }
     const message = e instanceof Error ? e.message : "network error";
-    throw new WorkerError("OPENAI_NETWORK", message, true);
+    throw new WorkerError("OPENAI_NETWORK", message, true, undefined, model);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 
   if (!response.ok) {
@@ -279,7 +361,13 @@ async function callOpenAI(job: JobRow, model: ImageModel): Promise<OpenAICallRes
       : response.status >= 500
       ? "OPENAI_SERVER"
       : "OPENAI_HTTP_ERROR";
-    throw new WorkerError(code, `openai status=${response.status} body=${raw}`, retriable, response.status, model);
+    throw new WorkerError(
+      code,
+      `openai status=${response.status} body=${raw}`,
+      retriable,
+      response.status,
+      model,
+    );
   }
 
   const json = await response.json() as {
@@ -298,7 +386,13 @@ async function callOpenAI(job: JobRow, model: ImageModel): Promise<OpenAICallRes
         downloadResponse = await fetch(imageOutput.url);
       } catch (e) {
         const message = e instanceof Error ? e.message : "image download error";
-        throw new WorkerError("OPENAI_BAD_RESPONSE", `image_url download failed: ${message}`, true, undefined, model);
+        throw new WorkerError(
+          "OPENAI_BAD_RESPONSE",
+          `image_url download failed: ${message}`,
+          true,
+          undefined,
+          model,
+        );
       }
       if (!downloadResponse.ok) {
         throw new WorkerError(
@@ -363,12 +457,18 @@ async function callOpenAIWithRetry(job: JobRow): Promise<OpenAICallResult> {
   }
 
   if (lastError) {
-    if (lastError instanceof WorkerError && lastTriedModel && !lastError.model) {
+    if (
+      lastError instanceof WorkerError && lastTriedModel && !lastError.model
+    ) {
       lastError.model = lastTriedModel;
     }
     throw lastError;
   }
-  throw new WorkerError("OPENAI_UNKNOWN", "unexpected retry termination", false);
+  throw new WorkerError(
+    "OPENAI_UNKNOWN",
+    "unexpected retry termination",
+    false,
+  );
 }
 
 async function triggerWorkerDrainPass(jobIdForLog: string): Promise<void> {
@@ -380,16 +480,22 @@ async function triggerWorkerDrainPass(jobIdForLog: string): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SELF_TRIGGER_TIMEOUT_MS);
   try {
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/nail-gen-worker`, {
-      method: "POST",
-      headers: {
-        "x-worker-secret": WORKER_SECRET,
+    const response = await fetch(
+      `${SUPABASE_URL}/functions/v1/nail-gen-worker`,
+      {
+        method: "POST",
+        headers: {
+          "x-worker-secret": WORKER_SECRET,
+        },
+        signal: controller.signal,
       },
-      signal: controller.signal,
-    });
+    );
     if (!response.ok) {
       const raw = truncate(await response.text(), 180);
-      jobLog(jobIdForLog, `drain_trigger_failed status=${response.status} body=${raw}`);
+      jobLog(
+        jobIdForLog,
+        `drain_trigger_failed status=${response.status} body=${raw}`,
+      );
       return;
     }
     jobLog(jobIdForLog, "drain_triggered reason=batch_full");
@@ -399,6 +505,50 @@ async function triggerWorkerDrainPass(jobIdForLog: string): Promise<void> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function recoverStaleProcessingJobs(): Promise<StaleRecoveryResult> {
+  const cutoffIso = new Date(Date.now() - PROCESSING_STALE_AFTER_MS)
+    .toISOString();
+
+  const { data: resetRows, error: resetError } = await supabaseAdmin
+    .from("nail_generation_jobs")
+    .update({
+      status: "queued",
+      started_at: null,
+      error_code: null,
+      error_message: null,
+    })
+    .eq("status", "processing")
+    .lt("started_at", cutoffIso)
+    .lt("attempt_count", MAX_JOB_ATTEMPTS)
+    .select("id");
+
+  if (resetError) {
+    throw new WorkerError("STALE_JOB_RESET_FAILED", resetError.message, false);
+  }
+
+  const { data: failedRows, error: failError } = await supabaseAdmin
+    .from("nail_generation_jobs")
+    .update({
+      status: "failed",
+      error_code: "WORKER_STALE_TIMEOUT",
+      error_message: "worker did not complete before stale processing timeout",
+      completed_at: new Date().toISOString(),
+    })
+    .eq("status", "processing")
+    .lt("started_at", cutoffIso)
+    .gte("attempt_count", MAX_JOB_ATTEMPTS)
+    .select("id");
+
+  if (failError) {
+    throw new WorkerError("STALE_JOB_FAIL_FAILED", failError.message, false);
+  }
+
+  return {
+    reset: resetRows?.length ?? 0,
+    failed: failedRows?.length ?? 0,
+  };
 }
 
 async function claimJob(job: JobRow): Promise<JobRow | null> {
@@ -414,7 +564,9 @@ async function claimJob(job: JobRow): Promise<JobRow | null> {
     .eq("id", job.id)
     .eq("status", "queued")
     .eq("attempt_count", job.attempt_count)
-    .select("id, user_id, shape, extension_mode, hand_object_path, reference_object_path, attempt_count, model")
+    .select(
+      "id, user_id, shape, extension_mode, hand_object_path, reference_object_path, attempt_count, model",
+    )
     .maybeSingle();
 
   if (error) {
@@ -447,7 +599,12 @@ async function completeJob(
   }
 }
 
-async function failJob(jobId: string, code: string, message: string, model?: ImageModel): Promise<void> {
+async function failJob(
+  jobId: string,
+  code: string,
+  message: string,
+  model?: ImageModel,
+): Promise<void> {
   await supabaseAdmin
     .from("nail_generation_jobs")
     .update({
@@ -491,7 +648,10 @@ async function deactivateInvalidPushTokens(tokenIds: string[]): Promise<void> {
   }
 }
 
-async function sendAIGenerationPush(job: JobRow, eventType: AIGenerationPushEventType): Promise<void> {
+async function sendAIGenerationPush(
+  job: JobRow,
+  eventType: AIGenerationPushEventType,
+): Promise<void> {
   try {
     const tokens = await fetchActivePushTokens(job.user_id);
     if (tokens.length === 0) {
@@ -508,14 +668,19 @@ async function sendAIGenerationPush(job: JobRow, eventType: AIGenerationPushEven
       await deactivateInvalidPushTokens(result.invalidTokenIds);
     }
 
-    const skipped = result.skippedReason ? ` skipped_reason=${result.skippedReason}` : "";
+    const skipped = result.skippedReason
+      ? ` skipped_reason=${result.skippedReason}`
+      : "";
     jobLog(
       job.id,
       `push_dispatch event=${eventType} attempted=${result.attempted} sent=${result.sent} failed=${result.failed} invalidated=${result.invalidTokenIds.length}${skipped}`,
     );
   } catch (e) {
     const message = e instanceof Error ? truncate(e.message, 200) : "unknown";
-    jobLog(job.id, `push_dispatch_failed event=${eventType} message=${message}`);
+    jobLog(
+      job.id,
+      `push_dispatch_failed event=${eventType} message=${message}`,
+    );
   }
 }
 
@@ -526,13 +691,22 @@ async function generateAndAttachThumbnail(
 ): Promise<void> {
   const thumbnailStartedAt = performance.now();
   try {
-    const thumbnailBytes = await buildJpegThumbnailBytesFromResult(resultObjectPath);
+    const thumbnailBytes = await buildJpegThumbnailBytesFromResult(
+      resultObjectPath,
+    );
     await uploadJpegThumbnail(thumbnailObjectPath, thumbnailBytes);
     await updateThumbnailPath(job.id, thumbnailObjectPath);
     const thumbnailMs = performance.now() - thumbnailStartedAt;
-    jobLog(job.id, `thumbnail_ready thumbnail_ms=${clampMs(thumbnailMs)} content_type=${THUMBNAIL_CONTENT_TYPE}`);
+    jobLog(
+      job.id,
+      `thumbnail_ready thumbnail_ms=${
+        clampMs(thumbnailMs)
+      } content_type=${THUMBNAIL_CONTENT_TYPE}`,
+    );
   } catch (e) {
-    const message = e instanceof Error ? truncate(e.message, 180) : "thumbnail unknown error";
+    const message = e instanceof Error
+      ? truncate(e.message, 180)
+      : "thumbnail unknown error";
     jobLog(job.id, `thumbnail_skipped reason=${message}`);
   }
 }
@@ -548,15 +722,33 @@ serve(async (req) => {
     return errorResponse(401, "unauthorized worker call");
   }
 
+  try {
+    const recovered = await recoverStaleProcessingJobs();
+    if (recovered.reset > 0 || recovered.failed > 0) {
+      jobLog(
+        "queue",
+        `stale_processing_recovered reset=${recovered.reset} failed=${recovered.failed}`,
+      );
+    }
+  } catch (e) {
+    const normalized = normalizeError(e);
+    return errorResponse(500, normalized.message, normalized.code);
+  }
+
   const { data: queuedJobs, error: queueError } = await supabaseAdmin
     .from("nail_generation_jobs")
-    .select("id, user_id, shape, extension_mode, hand_object_path, reference_object_path, attempt_count, model")
+    .select(
+      "id, user_id, shape, extension_mode, hand_object_path, reference_object_path, attempt_count, model",
+    )
     .eq("status", "queued")
     .order("created_at", { ascending: true })
     .limit(MAX_BATCH);
 
   if (queueError) {
-    return errorResponse(500, `queued jobs lookup failed: ${queueError.message}`);
+    return errorResponse(
+      500,
+      `queued jobs lookup failed: ${queueError.message}`,
+    );
   }
 
   let claimedCount = 0;
@@ -578,7 +770,10 @@ serve(async (req) => {
       const jobStartedAt = performance.now();
       const openaiResult = await callOpenAIWithRetry(claimed);
       const resultObjectPath = `${claimed.user_id}/${claimed.id}/result.png`;
-      const thumbnailObjectPath = defaultThumbnailObjectPath(claimed.user_id, claimed.id);
+      const thumbnailObjectPath = defaultThumbnailObjectPath(
+        claimed.user_id,
+        claimed.id,
+      );
       claimed.model = openaiResult.model;
 
       const uploadStartedAt = performance.now();
@@ -590,17 +785,31 @@ serve(async (req) => {
         });
 
       if (uploadError) {
-        throw new WorkerError("RESULT_UPLOAD_FAILED", uploadError.message, false);
+        throw new WorkerError(
+          "RESULT_UPLOAD_FAILED",
+          uploadError.message,
+          false,
+        );
       }
       const uploadMs = performance.now() - uploadStartedAt;
 
       await completeJob(claimed, resultObjectPath, null);
       await sendAIGenerationPush(claimed, "ai_generation_completed");
-      runInBackground(generateAndAttachThumbnail(claimed, resultObjectPath, thumbnailObjectPath));
+      runInBackground(
+        generateAndAttachThumbnail(
+          claimed,
+          resultObjectPath,
+          thumbnailObjectPath,
+        ),
+      );
       const totalMs = performance.now() - jobStartedAt;
       jobLog(
         claimed.id,
-        `image_api=edits image_model=${openaiResult.model} download_ms=${clampMs(openaiResult.downloadMs)} openai_ms=${clampMs(openaiResult.openaiMs)} upload_ms=${clampMs(uploadMs)} total_ms=${clampMs(totalMs)} thumbnail_status=background`,
+        `image_api=edits image_model=${openaiResult.model} download_ms=${
+          clampMs(openaiResult.downloadMs)
+        } openai_ms=${clampMs(openaiResult.openaiMs)} upload_ms=${
+          clampMs(uploadMs)
+        } total_ms=${clampMs(totalMs)} thumbnail_status=background`,
       );
       completedCount += 1;
     } catch (e) {
@@ -611,7 +820,12 @@ serve(async (req) => {
       if (claimed) {
         await sendAIGenerationPush(claimed, "ai_generation_failed");
       }
-      jobLog(jobId, `failed code=${normalized.code} message=${truncate(normalized.message, 200)}`);
+      jobLog(
+        jobId,
+        `failed code=${normalized.code} message=${
+          truncate(normalized.message, 200)
+        }`,
+      );
       failedCount += 1;
     }
   }
