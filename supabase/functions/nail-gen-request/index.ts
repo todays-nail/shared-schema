@@ -20,7 +20,8 @@ const ALLOWED_EXTENSION_MODES: ReadonlySet<ExtensionMode> = new Set([
 ]);
 
 // path format: {user_id}/{job_id}/hand.{ext} or reference_1.{ext}
-const INPUT_PATH_REGEX = /^([0-9a-f-]{36})\/([0-9a-f-]{36})\/(hand|reference_1)\.(jpg|jpeg|png|webp)$/i;
+const INPUT_PATH_REGEX =
+  /^([0-9a-f-]{36})\/([0-9a-f-]{36})\/(hand|reference_1)\.(jpg|jpeg|png|webp)$/i;
 
 type ReqBody = {
   shape?: NailShape;
@@ -33,7 +34,9 @@ type EdgeRuntimeLike = {
   waitUntil?: (promise: Promise<unknown>) => void;
 };
 
-function normalizeExtensionMode(value: string | undefined): ExtensionMode | null {
+function normalizeExtensionMode(
+  value: string | undefined,
+): ExtensionMode | null {
   if (!value) return null;
   const normalized = value.trim().toUpperCase();
   if (ALLOWED_EXTENSION_MODES.has(normalized as ExtensionMode)) {
@@ -75,7 +78,10 @@ async function requireUserId(req: Request): Promise<string> {
   return sub.toLowerCase();
 }
 
-async function ensureObjectExists(bucket: string, objectPath: string): Promise<boolean> {
+async function ensureObjectExists(
+  bucket: string,
+  objectPath: string,
+): Promise<boolean> {
   // Avoid downloading full image bytes during request validation.
   // A short-lived signed URL generation is enough to verify object existence.
   const { data, error } = await supabaseAdmin.storage
@@ -87,50 +93,68 @@ async function ensureObjectExists(bucket: string, objectPath: string): Promise<b
 
 async function triggerWorkerNow(jobId: string): Promise<void> {
   if (!SUPABASE_URL || !WORKER_SECRET) {
-    console.warn(`[nail-gen-request] skip immediate worker trigger: missing env (job_id=${jobId})`);
+    console.warn(
+      `[nail-gen-request] skip immediate worker trigger: missing env (job_id=${jobId})`,
+    );
     return;
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), WORKER_TRIGGER_TIMEOUT_MS);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    WORKER_TRIGGER_TIMEOUT_MS,
+  );
 
   try {
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/nail-gen-worker`, {
-      method: "POST",
-      headers: {
-        "x-worker-secret": WORKER_SECRET,
+    const response = await fetch(
+      `${SUPABASE_URL}/functions/v1/nail-gen-worker`,
+      {
+        method: "POST",
+        headers: {
+          "x-worker-secret": WORKER_SECRET,
+        },
+        signal: controller.signal,
       },
-      signal: controller.signal,
-    });
+    );
 
     if (!response.ok) {
       const raw = await response.text();
       console.warn(
-        `[nail-gen-request] immediate worker trigger failed status=${response.status} job_id=${jobId} body=${raw.slice(0, 300)}`,
+        `[nail-gen-request] immediate worker trigger failed status=${response.status} job_id=${jobId} body=${
+          raw.slice(0, 300)
+        }`,
       );
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : "unknown error";
-    console.warn(`[nail-gen-request] immediate worker trigger error job_id=${jobId} message=${message}`);
+    console.warn(
+      `[nail-gen-request] immediate worker trigger error job_id=${jobId} message=${message}`,
+    );
   } finally {
     clearTimeout(timeout);
   }
 }
 
 function runInBackground(task: Promise<void>): void {
-  const runtime = (globalThis as typeof globalThis & { EdgeRuntime?: EdgeRuntimeLike }).EdgeRuntime;
+  const runtime =
+    (globalThis as typeof globalThis & { EdgeRuntime?: EdgeRuntimeLike })
+      .EdgeRuntime;
   if (runtime?.waitUntil) {
     runtime.waitUntil(
       task.catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[nail-gen-request] background task failed message=${message}`);
+        console.warn(
+          `[nail-gen-request] background task failed message=${message}`,
+        );
       }),
     );
     return;
   }
   void task.catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[nail-gen-request] background task failed message=${message}`);
+    console.warn(
+      `[nail-gen-request] background task failed message=${message}`,
+    );
   });
 }
 
@@ -201,7 +225,7 @@ serve(async (req) => {
         user_prompt: "",
         hand_object_path: handObjectPath,
         reference_object_path: referenceObjectPath,
-        model: "gpt-image-1.5",
+        model: "gpt-image-2",
         provider: "openai",
       })
       .select("id, status")
